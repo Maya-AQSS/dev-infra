@@ -25,6 +25,8 @@ El servicio web es el que se encarga de arrancar odoo.
 
    > Los bloques de _Inicialización de la base de datos_ y _Configuración de repositorios de módulos_ no son de aplicación en versiones inferiores a 19.
 
+   Además es posible instalar de manera automática módulos python a través de PIP, ya sea como dependencias externas de los módulos de Odoo o como otros módulos de Odoo. En el primero caso se han de definir en el fichero `requirements.txt` y en el segundo en el fichero `requirements-python-modules.txt` de cada módulo.
+
 4. Ejecutar _./up.sh_ desde la carpeta _odoodock_.
 
 5. Abrir el navegador y acceder a la URL _http://locahost:8069_.
