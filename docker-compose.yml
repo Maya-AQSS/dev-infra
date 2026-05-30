@@ -58,7 +58,7 @@ volumes:
       device: ${DATA_PATH_HOST}/pgadmin
 
   keycloak_data:
-
+  rabbitmq_data:
   n8n_data:
 
 networks:
@@ -379,12 +379,13 @@ services:
       - "${KEYCLOAK_PORT}:8080"
 
     # arranca en desarrollo
-    command: start-dev --http-relative-path /auth
+    command: start-dev --http-relative-path /auth --import-realm
     
     env_file:
       - ./keycloak/.env-keycloak
 
     volumes:
+      - ./keycloak/realms:/opt/keycloak/data/import/
       - ./keycloak/providers:/opt/keycloak/providers/
 
     environment:
