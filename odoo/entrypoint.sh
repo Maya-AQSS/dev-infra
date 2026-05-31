@@ -144,6 +144,14 @@ clone_repos() {
                 continue
             }
             echo "[entrypoint]   ✅ ${repo_name} clonado correctamente."
+
+            echo "[entrypoint]   ♻️ Sincronizando ramas"
+            cd "$repo_path"
+            git fetch origin
+
+            echo "[entrypoint]   ↪️ Cambiando a rama develop"
+            git checkout develop
+            cd ..
         fi
     done
     
@@ -479,6 +487,193 @@ EOF
 }
 
 # ============================================================
+# APLICACIONES QUE NECESITAN API KEY
+# Añadir aquí cada app que se conectará a Odoo.
+# Formato: "nombre_app"
+# Por cada app se creará:
+#   - Usuario Odoo: <app>_app@internal
+#   - Fichero de key: /var/lib/odoo/.api_key_<app>
+#   - Secret compartido: /run/secrets/api_key_<app>
+# ============================================================
+API_KEY_APPS=(
+    "dashboard"
+)
+
+# ============================================================
+# FUNCIÓN: Generar usuario de servicio y API key para una app
+# Uso: generate_api_key <nombre_app>
+# Ejemplo: generate_api_key maya
+# ============================================================
+generate_api_key() {
+    local app="$1"
+
+    if [ -z "$app" ]; then
+        echo "[entrypoint] ❌ generate_api_key: se requiere el nombre de la app."
+        return 1
+    fi
+
+    local login="${app}_app@internal"
+    local key_file="/var/lib/odoo/.api_key_${app}"
+    local secret_dir="/run/secrets"
+    local secret_file="${secret_dir}/api_key_${app}"
+
+    # Si ya existe la key persistida, no regenerar
+    if [ -f "$key_file" ]; then
+        echo "[entrypoint] ℹ️  API key de '${app}' ya existe (${key_file}). Saltando."
+        # Aseguramos que el secret también está disponible para los contenedores
+        if [ ! -f "$secret_file" ]; then
+            mkdir -p "$secret_dir"
+            head -1 "$key_file" > "$secret_file"
+            chmod 600 "$secret_file"
+        fi
+        return 0
+    fi
+
+    echo "[entrypoint] 🔑 Generando API key para app '${app}' (usuario: ${login})..."
+
+    # Script Python ejecutado con odoo shell
+    # Heredoc en variable para poder interpolar $login y $app
+    local python_script
+    python_script=$(cat <<PYTHON
+import sys
+from datetime import date
+from dateutil.relativedelta import relativedelta
+
+env = env  # disponible en odoo shell
+
+# 1. Habilitar generación programática de API keys
+env['ir.config_parameter'].sudo().set_param('base.enable_programmatic_api_keys', 'True')
+
+# 2. Crear usuario de servicio si no existe
+User = env['res.users'].sudo()
+app_user = User.search([('login', '=', '${login}')], limit=1)
+
+if not app_user:
+    # En Odoo 19 groups_id no puede usarse en create() ni write() directamente.
+    # El tipo de usuario se controla con sel_groups_* o share/active.
+    # Para un service account basta con crear el usuario sin grupos extra:
+    # Odoo le asignará automáticamente base.group_user al ser usuario interno.
+    app_user = User.create({
+        'name':   '${app} App',
+        'login':  '${login}',
+        'email':  '${login}',
+        'active': True,
+        'share':  False,   # False = usuario interno (no portal)
+    })
+    print(f"CREATED_USER:{app_user.id}", flush=True)
+else:
+    print(f"EXISTING_USER:{app_user.id}", flush=True)
+
+# 3. Revocar keys anteriores de este usuario (entorno limpio en reinstalación)
+old_keys = env['res.users.apikeys'].sudo().search([('user_id', '=', app_user.id)])
+if old_keys:
+    old_keys.unlink()
+    print(f"REVOKED_OLD_KEYS:{len(old_keys)}", flush=True)
+
+# 4. Commit del usuario antes de generar la key
+# (sin commit el usuario no existe aún en BD y generate() falla)
+env.cr.commit()
+
+# 5. Generar API key usando _generate() interno con sudo()
+# generate() (público) requiere una key existente para crear otra (rotación).
+# _generate() (privado) crea la key inicial sin esa restricción.
+# sudo() permite llamarlo como admin sin restricciones de usuario.
+import secrets
+expiry = date.today() + relativedelta(months=3)
+
+try:
+    from odoo import api as odoo_api
+    # Ejecutar _generate en el contexto del app_user pero con sudo
+    # para que env.uid sea app_user.id (necesario para asociar la key)
+    app_env = odoo_api.Environment(env.cr, app_user.id, {})
+    new_key = app_env["res.users.apikeys"].sudo()._generate(
+        None,
+        "${app}-initial",
+        expiry,
+    )
+    env.cr.commit()
+    print(f"API_KEY:{new_key}", flush=True)
+    print(f"EXPIRY:{expiry.isoformat()}", flush=True)
+except Exception as e:
+    print(f"ERROR:{e}", flush=True)
+PYTHON
+)
+
+    # Ejecutar con odoo shell capturando stdout y stderr por separado
+    local output stderr_output tmp_stderr
+    tmp_stderr=$(mktemp)
+
+    output=$(echo "$python_script" | $ODOO_BIN shell \
+        --db_host="${HOST}" \
+        --db_port="${PORT}" \
+        --db_user="${USER}" \
+        --db_password="${PASSWORD}" \
+        --database="${ODOO_DB_NAME}" \
+        --no-http 2>"$tmp_stderr")
+
+    local shell_exit=$?
+    stderr_output=$(cat "$tmp_stderr")
+    rm -f "$tmp_stderr"
+
+    # Odoo shell mezcla sus propios logs con el stdout del script Python.
+    # Filtramos solo las líneas con nuestros prefijos conocidos.
+    local api_key expiry
+    api_key=$(echo "$output" | grep '^API_KEY:' | tail -1 | cut -d: -f2-)
+    expiry=$(echo  "$output" | grep '^EXPIRY:'  | tail -1 | cut -d: -f2-)
+
+    if [ -z "$api_key" ]; then
+        echo "[entrypoint] ❌ ERROR: No se pudo generar la API key para '${app}'."
+        echo "[entrypoint]    Shell exit code: ${shell_exit}"
+        echo "[entrypoint]    --- stdout ---"
+        echo "$output"
+        echo "[entrypoint]    --- stderr ---"
+        echo "$stderr_output"
+        echo "[entrypoint]    ---"
+        echo "[entrypoint]    Posibles causas:"
+        echo "[entrypoint]      1. El método generate() tiene nombre diferente en esta versión de Odoo"
+        echo "[entrypoint]      2. base.enable_programmatic_api_keys no está soportado"
+        echo "[entrypoint]      3. Error de permisos al crear el usuario de servicio"
+        return 1
+    fi
+
+    # Persistir en el volumen de datos (evita regenerar en reinicios)
+    printf '%s\n%s\n' "$api_key" "$expiry" > "$key_file"
+    chmod 600 "$key_file"
+
+    # Copiar al volumen compartido para que lo lea el contenedor de la app
+    mkdir -p "$secret_dir"
+    echo "$api_key" > "$secret_file"
+    chmod 600 "$secret_file"
+
+    echo "[entrypoint] ✅ API key generada para '${app}'."
+    echo "[entrypoint]    Usuario:    ${login}"
+    echo "[entrypoint]    Expira:     ${expiry}"
+    echo "[entrypoint]    Persistida: ${key_file}"
+    echo "[entrypoint]    Secret:     ${secret_file}"
+}
+
+# ============================================================
+# FUNCIÓN: Generar API keys para todas las apps registradas
+# ============================================================
+generate_all_api_keys() {
+    echo "[entrypoint] =========================================================="
+    echo "[entrypoint] 🔑 GENERANDO API KEYS PARA APPS: ${API_KEY_APPS[*]}"
+    echo "[entrypoint] =========================================================="
+
+    local failed=0
+    for app in "${API_KEY_APPS[@]}"; do
+        generate_api_key "$app" || failed=$((failed + 1))
+    done
+
+    if [ "$failed" -gt 0 ]; then
+        echo "[entrypoint] ⚠️  ${failed} app(s) no pudieron generar su API key."
+        echo "[entrypoint]    Revisa los errores anteriores."
+    else
+        echo "[entrypoint] ✅ API keys generadas para todas las apps."
+    fi
+}
+
+# ============================================================
 # BLOQUE PRINCIPAL: Lógica de inicialización
 # ============================================================
 
@@ -511,11 +706,17 @@ if version_ge "$ODOO_VERSION" 19; then
 
             # 5. Instalar módulos adicionales
             install_modules
+
+            # 6. Generar API keys para todas las apps externas
+            generate_all_api_keys
         else
             echo "[entrypoint] ℹ️ La base de datos '${ODOO_DB_NAME}' ya existe. Saltando inicialización."
+
+            # Aunque la BD ya exista, asegurar que las keys están disponibles
+            generate_all_api_keys
         fi
 
-        # 6. Crear flag para no repetir en futuros reinicios
+        # 7. Crear flag para no repetir en futuros reinicios
         touch "$INIT_FLAG"
         echo "[entrypoint] ✅ Configuración inicial completada."
         echo "[entrypoint] =========================================================="
