@@ -1,0 +1,18 @@
+#######################################################
+# servicios a arrancar / services to be started up
+########################################################
+
+# servicios disponibles / available services:
+# web, moodle, pgadmin, jekyll, moodle, traefik, keycloak, n8n, rabbitmq, debezium
+
+# Array de servicios
+SERVICES=(
+  "web"
+  # "moodle"
+  # "pgadmin"
+  # "traefik"
+  "keycloak"
+  "n8n"
+  "rabbitmq"
+  # "debezium"
+)
