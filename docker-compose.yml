@@ -411,3 +411,18 @@ services:
     # lo incluimos en la red de traefik para que pueda comunicarse con él si arranco el servicio
     networks:
       - traefik_network
+
+  #############################
+  ## BRUNO CLI (AUTOMATION) ###
+  #############################
+  bruno-tests:
+    image: node:20-alpine
+    # Instala el CLI de Bruno al arrancar y se queda esperando comandos
+    entrypoint: ["sh", "-c", "npm install -g @usebruno/cli && tail -f /dev/null"]
+    volumes:
+      - ../:/tests
+    networks:
+      - traefik_network
+    depends_on:
+      - web
+      - keycloak
