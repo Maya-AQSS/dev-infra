@@ -98,7 +98,7 @@ El repo se añade en _odoodock_ como un submódulo.
 
 ```bash
 # desde odoodock
-git submodule add https://github.com/usuario/odoodock-additional-services.git '[ads]'
+git submodule add -f https://github.com/usuario/odoodock-additional-services.git '[ads]'
 ```
 
 > Es muy importante renombra el repositorio a `[ads]`

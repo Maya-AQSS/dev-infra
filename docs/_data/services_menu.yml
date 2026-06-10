@@ -16,5 +16,7 @@
       link: /services/n8n
     - name: rabbitmq
       link: /services/rabbitmq
+    - name: bruno
+      link: /services/bruno
     - name: debezium
       link: /services/debezium

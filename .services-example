@@ -3,7 +3,7 @@
 ########################################################
 
 # servicios disponibles / available services:
-# web, moodle, pgadmin, jekyll, moodle, traefik, keycloak, n8n, rabbitmq, debezium
+# web, moodle, pgadmin, jekyll, moodle, traefik, keycloak, n8n, rabbitmq, debezium, bruno-testç
 
 # Array de servicios
 SERVICES=(
@@ -15,4 +15,5 @@ SERVICES=(
   # "n8n"
   # "rabbitmq"
   # "debezium"
+  # "bruno-tests"
 )
