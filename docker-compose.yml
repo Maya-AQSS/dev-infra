@@ -40,6 +40,13 @@ volumes:
       type: 'none'
       o: 'bind'
       device: ${SERVER_INFO_PATH_HOST}/odoo/repo
+
+  odoo_secrets:
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: ${SERVER_INFO_PATH_HOST}/odoo/secrets
       
   mariadb_data:
     driver: local
@@ -136,6 +143,7 @@ services:
       - odoo_logs:/var/log/odoo
       - odoo_repo:${REPO_PATH_CONTAINER}    
       - odoo_conf:/etc/odoo
+      - odoo_secrets:/var/lib/odoo/secrets
 
     networks:
       - traefik_network

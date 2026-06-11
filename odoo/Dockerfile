@@ -146,9 +146,13 @@ RUN mkdir /mnt/extra-addons/.vscode
 COPY ./.vscode/launch.json /mnt/extra-addons/.vscode/launch.json
 COPY ./.vscode/extensions.json /mnt/extra-addons/.vscode/extensions.json
 
+# creo un directorio para los secretos
+RUN mkdir -p /run/secrets
+RUN mkdir -p /var/lib/odoo/secrets
+
 # Asigno propietario y grupo al directorio de configuración, addons
 # y al de logs
-RUN chown -R odoo:odoo /etc/odoo /var/log/odoo /mnt/extra-addons /var/lib/odoo ${REPO_PATH_CONTAINER} 
+RUN chown -R odoo:odoo /etc/odoo /var/log/odoo /mnt/extra-addons /var/lib/odoo /var/lib/odoo/secrets /run/secrets ${REPO_PATH_CONTAINER} 
 
 # puerto por el que escucha conexiones
 EXPOSE 8069

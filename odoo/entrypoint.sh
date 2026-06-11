@@ -492,7 +492,7 @@ EOF
 # Formato: "nombre_app"
 # Por cada app se creará:
 #   - Usuario Odoo: <app>_app@internal
-#   - Fichero de key: /var/lib/odoo/.api_key_<app>
+#   - Fichero de key: /var/lib/odoo/secrets/.api_key_<app>
 #   - Secret compartido: /run/secrets/api_key_<app>
 # ============================================================
 API_KEY_APPS=(
@@ -513,7 +513,7 @@ generate_api_key() {
     fi
 
     local login="${app}_app@internal"
-    local key_file="/var/lib/odoo/.api_key_${app}"
+    local key_file="/var/lib/odoo/secrets/.api_key_${app}"
     local secret_dir="/run/secrets"
     local secret_file="${secret_dir}/api_key_${app}"
 
@@ -524,7 +524,7 @@ generate_api_key() {
         if [ ! -f "$secret_file" ]; then
             mkdir -p "$secret_dir"
             head -1 "$key_file" > "$secret_file"
-            chmod 600 "$secret_file"
+            chmod 644 "$secret_file" # permiso de lectura para el grupo y otros
         fi
         return 0
     fi
@@ -638,12 +638,12 @@ PYTHON
 
     # Persistir en el volumen de datos (evita regenerar en reinicios)
     printf '%s\n%s\n' "$api_key" "$expiry" > "$key_file"
-    chmod 600 "$key_file"
+    chmod 644 "$key_file" # permiso de lectura para el grupo y otros
 
     # Copiar al volumen compartido para que lo lea el contenedor de la app
     mkdir -p "$secret_dir"
     echo "$api_key" > "$secret_file"
-    chmod 600 "$secret_file"
+    chmod 644 "$secret_file" # permiso de lectura para el grupo y otros
 
     echo "[entrypoint] ✅ API key generada para '${app}'."
     echo "[entrypoint]    Usuario:    ${login}"

@@ -18,7 +18,7 @@ test -z $APP_MODULE_PATH_HOST && { error "Variable APP_MODULE_PATH_HOST no defin
 test -z $DATA_PATH_HOST && { error "Variable DATA_PATH_HOST no definida en .env. Saliendo..." ; exit; }
 
 # se crean, si no existen, los directorios de trabajo
-mkdir -p $SERVER_INFO_PATH_HOST/odoo/{logs,repo,config}
+mkdir -p $SERVER_INFO_PATH_HOST/odoo/{logs,repo,config,secrets}
 mkdir -p $APP_MODULE_PATH_HOST
 mkdir -p $DATA_PATH_HOST/odoo/$ODOO_VERSION/$ODOO_SERVER_NAME
 mkdir -p $SERVER_INFO_PATH_HOST/n8n_files
