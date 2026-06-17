@@ -10,7 +10,7 @@ SERVICES=(
   "web"
   # "moodle"
   # "pgadmin"
-  # "traefik"
+  "traefik"
   "keycloak"
   "n8n"
   "rabbitmq"
