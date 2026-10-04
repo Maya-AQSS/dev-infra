@@ -37,6 +37,16 @@ ODOO_PYTHON_PACKAGES="/var/lib/odoo/python-packages"
 # Flag para saber si ya se inicializó (persiste en el volumen de datos)
 INIT_FLAG="/var/lib/odoo/.odoo_initialized"
 
+ # Detectar el ejecutable de Odoo
+if command -v odoo &> /dev/null; then
+    ODOO_BIN="odoo"
+elif command -v odoo-bin &> /dev/null; then
+    ODOO_BIN="odoo-bin"
+else
+    ODOO_BIN="/usr/bin/odoo"
+fi
+
+
 # ==============================================================
 # FUNCIÓN: Configurar PYTHONPATH para módulos instalados vía PIP
 # ==============================================================
@@ -178,14 +188,6 @@ init_database() {
     echo "[entrypoint]   Demo data:     ${ODOO_DB_WITH_DEMO}"
     echo "[entrypoint] =========================================================="
 
-    # Detectar el ejecutable de Odoo
-    if command -v odoo &> /dev/null; then
-        ODOO_BIN="odoo"
-    elif command -v odoo-bin &> /dev/null; then
-        ODOO_BIN="odoo-bin"
-    else
-        ODOO_BIN="/usr/bin/odoo"
-    fi
 
     # ============================================================
     # MÉTODO CLÁSICO (compatible con todas las versiones de Odoo)
@@ -423,15 +425,6 @@ install_modules() {
         addons_path="${addons_path},${ADDONS_DIR}"
     fi
 
-    # Detectar el ejecutable de Odoo
-    if command -v odoo &> /dev/null; then
-        ODOO_BIN="odoo"
-    elif command -v odoo-bin &> /dev/null; then
-        ODOO_BIN="odoo-bin"
-    else
-        ODOO_BIN="/usr/bin/odoo"
-    fi
-
     # NOTA: Los argumentos cortos (-d, -i) NO usan '=' en Odoo
     local install_args=(
         "-d" "${ODOO_DB_NAME}"
@@ -495,8 +488,9 @@ EOF
 #   - Fichero de key: /var/lib/odoo/secrets/.api_key_<app>
 #   - Secret compartido: /run/secrets/api_key_<app>
 # ============================================================
-API_KEY_APPS=(
-    "dashboard"
+declare -A API_KEY_APPS=(
+    ["dashboard"]=""
+    ["itaca"]="maya_core.group_itaca_integration"
 )
 
 # ============================================================
@@ -506,6 +500,7 @@ API_KEY_APPS=(
 # ============================================================
 generate_api_key() {
     local app="$1"
+    local group_xml_id="$2"
 
     if [ -z "$app" ]; then
         echo "[entrypoint] ❌ generate_api_key: se requiere el nombre de la app."
@@ -530,6 +525,9 @@ generate_api_key() {
     fi
 
     echo "[entrypoint] 🔑 Generando API key para app '${app}' (usuario: ${login})..."
+    if [ -n "$group_xml_id" ]; then
+        echo "[entrypoint] 🛡️  Grupo a asignar: ${group_xml_id}"
+    fi
 
     # Script Python ejecutado con odoo shell
     # Heredoc en variable para poder interpolar $login y $app
@@ -564,17 +562,31 @@ if not app_user:
 else:
     print(f"EXISTING_USER:{app_user.id}", flush=True)
 
-# 3. Revocar keys anteriores de este usuario (entorno limpio en reinstalación)
+# 3. Asignar grupo de seguridad específico si se ha proporcionado
+group_xml_id = "${group_xml_id}".strip()
+if group_xml_id:
+    try:
+        group = env.ref(group_xml_id, raise_if_not_found=False)
+        if group:
+            # En Odoo 19 (4, id) en write() añade la relación Many2many sin borrar las existentes
+            app_user.write({'groups_id': [(4, group.id)]})
+            print(f"ASSIGNED_GROUP:{group_xml_id}", flush=True)
+        else:
+            print(f"WARNING_GROUP_NOT_FOUND:{group_xml_id}", flush=True)
+    except Exception as e:
+        print(f"ERROR_ASSIGNING_GROUP:{e}", flush=True)
+
+# 4. Revocar keys anteriores de este usuario (entorno limpio en reinstalación)
 old_keys = env['res.users.apikeys'].sudo().search([('user_id', '=', app_user.id)])
 if old_keys:
     old_keys.unlink()
     print(f"REVOKED_OLD_KEYS:{len(old_keys)}", flush=True)
 
-# 4. Commit del usuario antes de generar la key
+# 5. Commit del usuario antes de generar la key
 # (sin commit el usuario no existe aún en BD y generate() falla)
 env.cr.commit()
 
-# 5. Generar API key usando _generate() interno con sudo()
+# 6. Generar API key usando _generate() interno con sudo()
 # generate() (público) requiere una key existente para crear otra (rotación).
 # _generate() (privado) crea la key inicial sin esa restricción.
 # sudo() permite llamarlo como admin sin restricciones de usuario.
@@ -661,8 +673,9 @@ generate_all_api_keys() {
     echo "[entrypoint] =========================================================="
 
     local failed=0
-    for app in "${API_KEY_APPS[@]}"; do
-        generate_api_key "$app" || failed=$((failed + 1))
+    for app in "${!API_KEY_APPS[@]}"; do
+        group="${API_KEY_APPS[$app]}"
+        generate_api_key "$app" "$group" || failed=$((failed + 1))
     done
 
     if [ "$failed" -gt 0 ]; then
