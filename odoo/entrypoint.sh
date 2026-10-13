@@ -30,6 +30,20 @@ fi
 : ${ODOO_GIT_REPOS:=""}
 : ${ODOO_INIT_MODULES:=""}
 
+# ------------------------------------------------------------
+# Usuario "maya": administrador del GATEWAY de Moodle (no de Odoo).
+# Es un usuario interno de Odoo sin contraseña y sin grupos de administración: el gateway
+# lo reconoce como administrador porque su id está en GATEWAY_CREDENTIALS_FILE.
+# ------------------------------------------------------------
+: ${CREATE_MAYA_USER:=true}                  # false para no crearlo
+: ${MAYA_ODOO_LOGIN:=maya}                   # login del usuario en Odoo
+: ${MAYA_MOODLE_USERNAME:=${MAYA_ODOO_LOGIN}} # su usuario en Moodle (res.users.moodle_username)
+: ${MAYA_MOODLE_PASSWORD:=}                  # su contraseña de Moodle (también vale MAYA_MOODLE_PASSWORD_FILE)
+: ${GATEWAY_CREDENTIALS_FILE:=/run/secrets/gateway_service_credentials.json}
+if [ -v MAYA_MOODLE_PASSWORD_FILE ]; then
+    MAYA_MOODLE_PASSWORD="$(< "$MAYA_MOODLE_PASSWORD_FILE")"
+fi
+
 # Directorio donde se clonarán los repos (volumen mapeado a /mnt/extra-addons)
 ADDONS_DIR="/mnt/extra-addons"
 # Directorio donde se instalarán los paquetes Python de módulos Odoo (vía PIP)
@@ -687,6 +701,176 @@ generate_all_api_keys() {
 }
 
 # ============================================================
+# FUNCIÓN: Escribir las credenciales de las cuentas de servicio del gateway
+# Uso: write_gateway_credentials <id del usuario de Odoo>
+#
+# El gateway trata como "administrador" a los ids que aparezcan en este fichero
+# (SERVICE_CREDENTIALS_FILE). Formato: {"<id>": {"password": "<contraseña de Moodle>"}}
+# El nombre de usuario de Moodle NO va aquí: el gateway lo lee de res_users.moodle_username.
+# El id depende de la base de datos, por eso el fichero se regenera en cada arranque.
+# ============================================================
+write_gateway_credentials() {
+    local maya_id="$1"
+
+    if [ -z "$MAYA_MOODLE_PASSWORD" ]; then
+        echo "[entrypoint]    ⚠️  MAYA_MOODLE_PASSWORD no está definida: no se escribe ${GATEWAY_CREDENTIALS_FILE}."
+        echo "[entrypoint]       Sin ese fichero el gateway tratará a '${MAYA_ODOO_LOGIN}' como un usuario normal."
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$GATEWAY_CREDENTIALS_FILE")"
+
+    # La contraseña llega por variable de entorno y el heredoc va entrecomillado ('PY'):
+    # así no se interpola en el código y no hay problemas con comillas ni caracteres especiales.
+    MAYA_ID="$maya_id" MAYA_PW="$MAYA_MOODLE_PASSWORD" python3 - "$GATEWAY_CREDENTIALS_FILE" <<'PY' || {
+import json, os, sys
+
+path = sys.argv[1]
+data = {os.environ["MAYA_ID"]: {"password": os.environ["MAYA_PW"]}}
+
+# escritura atómica, y sin que otros puedan leer el fichero temporal
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(data, f)
+os.replace(tmp, path)
+PY
+        echo "[entrypoint]    ❌ No se pudo escribir ${GATEWAY_CREDENTIALS_FILE}."
+        return 1
+    }
+
+    # Mismo criterio que los demás secretos de este script: el contenedor del gateway corre
+    # con otro usuario y necesita poder leerlo. SOLO PARA DESARROLLO: en producción usa un
+    # secret real (permisos 0400/0440) o Vault.
+    chmod 644 "$GATEWAY_CREDENTIALS_FILE"
+    echo "[entrypoint]    ✅ Credenciales del gateway escritas: ${GATEWAY_CREDENTIALS_FILE}"
+}
+
+# ============================================================
+# FUNCIÓN: Asegurar el usuario "maya" (administrador del gateway)
+#
+# Idempotente: se ejecuta en cada arranque. Si el usuario ya existe lo reutiliza.
+#   - Odoo:    usuario interno, sin contraseña y sin grupos de administración.
+#   - Moodle:  rellena res.users.moodle_username (campo del módulo maya_moodle).
+#   - Gateway: escribe su id y su contraseña de Moodle en GATEWAY_CREDENTIALS_FILE.
+# ============================================================
+ensure_maya_user() {
+    if [ "$CREATE_MAYA_USER" != "true" ]; then
+        echo "[entrypoint] ℹ️  CREATE_MAYA_USER=${CREATE_MAYA_USER}: no se gestiona el usuario '${MAYA_ODOO_LOGIN}'."
+        return 0
+    fi
+
+    if ! db_exists "$ODOO_DB_NAME"; then
+        echo "[entrypoint] ℹ️  La base de datos '${ODOO_DB_NAME}' no existe todavía: no se crea el usuario '${MAYA_ODOO_LOGIN}'."
+        return 0
+    fi
+
+    echo "[entrypoint] 👤 Asegurando el usuario '${MAYA_ODOO_LOGIN}' (administrador del gateway de Moodle)..."
+
+    # Los parámetros llegan por variables de entorno (no se interpolan en el código Python).
+    local python_script
+    python_script=$(cat <<'PYTHON'
+import os
+
+login = os.environ["MAYA_LOGIN"]
+moodle_username = os.environ.get("MAYA_MOODLE_USERNAME", "")
+
+# active_test=False: si el usuario existe pero está archivado, también lo encontramos.
+# no_reset_password: no enviar el correo de invitación al crearlo.
+User = env['res.users'].sudo().with_context(active_test=False, no_reset_password=True)
+
+user = User.search([('login', '=', login)], limit=1)
+if not user:
+    # Usuario interno (share=False) sin contraseña y sin grupos extra: Odoo le asigna solo el
+    # grupo de usuario interno. NO es administrador de Odoo; lo es del gateway (ver
+    # write_gateway_credentials). Misma forma que los usuarios <app>_app@internal.
+    user = User.create({
+        'name': 'Maya',
+        'login': login,
+        'active': True,
+        'share': False,
+    })
+    print(f"MAYA_CREATED:{user.id}", flush=True)
+else:
+    if not user.active:
+        user.write({'active': True})
+    print(f"MAYA_EXISTING:{user.id}", flush=True)
+
+# moodle_username lo añade el módulo maya_moodle; si aún no está instalado, avisamos.
+if 'moodle_username' in User._fields:
+    if moodle_username and user.moodle_username != moodle_username:
+        user.write({'moodle_username': moodle_username})
+    print(f"MAYA_MOODLE_USERNAME:{user.moodle_username}", flush=True)
+else:
+    print("MAYA_WARNING_NO_MOODLE_FIELD", flush=True)
+
+env.cr.commit()
+print(f"MAYA_USER_ID:{user.id}", flush=True)
+
+group_xml_id = "maya_core.group_maya_user".strip()
+if group_xml_id:
+    try:
+        group = env.ref(group_xml_id, raise_if_not_found=False)
+        if group:
+            # En Odoo 19 (4, id) en write() añade la relación Many2many sin borrar las existentes
+            app_user.write({'groups_id': [(4, group.id)]})
+            print(f"ASSIGNED_GROUP:{group_xml_id}", flush=True)
+        else:
+            print(f"WARNING_GROUP_NOT_FOUND:{group_xml_id}", flush=True)
+    except Exception as e:
+        print(f"ERROR_ASSIGNING_GROUP:{e}", flush=True)
+PYTHON
+)
+
+    local output stderr_output tmp_stderr
+    local shell_exit=0
+    tmp_stderr=$(mktemp)
+
+    # "|| shell_exit=$?": con "set -e" un fallo de odoo shell no debe abortar el entrypoint.
+    output=$(echo "$python_script" | \
+        MAYA_LOGIN="${MAYA_ODOO_LOGIN}" MAYA_MOODLE_USERNAME="${MAYA_MOODLE_USERNAME}" \
+        $ODOO_BIN shell \
+        --db_host="${HOST}" \
+        --db_port="${PORT}" \
+        --db_user="${USER}" \
+        --db_password="${PASSWORD}" \
+        --database="${ODOO_DB_NAME}" \
+        --no-http 2>"$tmp_stderr") || shell_exit=$?
+    stderr_output=$(cat "$tmp_stderr")
+    rm -f "$tmp_stderr"
+
+    # odoo shell mezcla sus logs con el stdout del script: nos quedamos con nuestras líneas.
+    local maya_id
+    maya_id=$(echo "$output" | grep '^MAYA_USER_ID:' | tail -1 | cut -d: -f2-)
+
+    if [ -z "$maya_id" ]; then
+        echo "[entrypoint] ❌ ERROR: no se pudo crear/localizar el usuario '${MAYA_ODOO_LOGIN}'."
+        echo "[entrypoint]    Shell exit code: ${shell_exit}"
+        echo "[entrypoint]    --- stdout ---"
+        echo "$output"
+        echo "[entrypoint]    --- stderr ---"
+        echo "$stderr_output"
+        echo "[entrypoint]    ---"
+        return 1
+    fi
+
+    if echo "$output" | grep -q '^MAYA_CREATED:'; then
+        echo "[entrypoint]    ✅ Usuario '${MAYA_ODOO_LOGIN}' creado (id ${maya_id})."
+    else
+        echo "[entrypoint]    ℹ️  Usuario '${MAYA_ODOO_LOGIN}' ya existía (id ${maya_id})."
+    fi
+
+    if echo "$output" | grep -q '^MAYA_WARNING_NO_MOODLE_FIELD'; then
+        echo "[entrypoint]    ⚠️  El campo res.users.moodle_username no existe: ¿está maya_moodle en ODOO_INIT_MODULES?"
+        echo "[entrypoint]       Sin moodle_username el gateway no podrá autenticar a '${MAYA_ODOO_LOGIN}' en Moodle."
+    else
+        echo "[entrypoint]    Usuario de Moodle: ${MAYA_MOODLE_USERNAME}"
+    fi
+
+    write_gateway_credentials "$maya_id"
+}
+
+# ============================================================
 # BLOQUE PRINCIPAL: Lógica de inicialización
 # ============================================================
 
@@ -739,6 +923,10 @@ if version_ge "$ODOO_VERSION" 19; then
         echo "[entrypoint]    docker compose exec web rm ${INIT_FLAG}"
         echo "[entrypoint]    Y reinicia el contenedor: docker compose restart web"
     fi
+
+    # Usuario "maya" (administrador del gateway). Fuera del bloque del INIT_FLAG a propósito:
+    # es idempotente y se asegura en CADA arranque. Si falla, Odoo arranca igualmente.
+    ensure_maya_user || echo "[entrypoint] ⚠️  No se pudo asegurar el usuario '${MAYA_ODOO_LOGIN}'. Continuando."
 else
     echo "[entrypoint] ⚠️ Versión de Odoo detectada: ${ODOO_VERSION}"
     echo "[entrypoint]    La inicialización automática de base de datos solo está disponible"
